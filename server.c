@@ -12,7 +12,7 @@
 #include <stdbool.h>
 
 const size_t QUEUE_SIZE = 5;
-const size_t BUF_SIZE = 10;
+const size_t MSG_SIZE = 2;
 sig_atomic_t flag_continue = 1;
 bool init_flag = false;
 
@@ -38,23 +38,40 @@ void make_nonblk(int fd)
 
 ssize_t read_state(int client_fd, lamp_state_t* state)
 {
-    uint8_t query[2];
+    uint8_t buf[MSG_SIZE];
 
-    ssize_t ret = 0;
-    ret += read(client_fd, query, 1);
-    ret += read(client_fd, query + 1, 1);
-    state->power = query[0];
-    state->color = query[1];
-    return ret;
+    ssize_t ans = recv(client_fd, buf, MSG_SIZE, MSG_PEEK);
+    if (ans < MSG_SIZE) //return later
+        return 0;
+
+    ans = read(client_fd, buf, MSG_SIZE);
+    if (ans < MSG_SIZE) {
+        fprintf(stderr, "Failed to read exactly %d bytes, read %zd\n",
+                MSG_SIZE, ans);
+        return 0;
+    }
+
+    state->power = buf[0];
+    state->color = buf[1];
+#ifdef DEBUG
+    printf("Read %d %d\n", buf[0], buf[1]);
+#endif
+
+    return ans;
 }
 
 bool send_response(int client_fd, const lamp_state_t* state)
 {
     uint8_t data[2] = {state->power, state->color};
-    if (write(client_fd, data, 2) < 2) {
+    ssize_t ans = write(client_fd, data, 2);
+    if (ans < 2) {
+#ifdef DEBUG
+        printf("ERROR\n");
+#endif
         return false;
     }
 
+    printf("Written %zd bytes\n", ans);
     return true;
 }
 
@@ -73,6 +90,7 @@ void communicate(int fd)
     if (!init_flag) {
         prev_state = state;
         cur_state = state;
+        init_flag = true;
     } else if (!states_equal(&prev_state, &state)) {
         prev_state = cur_state;
         cur_state = state;
@@ -134,7 +152,6 @@ int main(int argc, char *argv[])
     }
     int client_fd = -1;
     struct epoll_event *events = calloc(QUEUE_SIZE, sizeof(struct epoll_event));
-    char buf[BUF_SIZE];
     while (flag_continue) {
         int read_events = epoll_wait(epoll_fd, events, QUEUE_SIZE, -1);
         for (int i = 0; i < read_events; ++i) {
