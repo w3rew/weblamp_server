@@ -10,13 +10,17 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
 const size_t QUEUE_SIZE = 5;
-const size_t MSG_SIZE = 2;
+const size_t MSG_SIZE = 10;
+const uint64_t KEY = 0x1337fda380dff23bULL;
 sig_atomic_t flag_continue = 1;
 bool init_flag = false;
 
 typedef struct {
+    uint64_t key;
     uint8_t power;
     uint8_t color;
 } lamp_state_t;
@@ -51,10 +55,12 @@ ssize_t read_state(int client_fd, lamp_state_t* state)
         return 0;
     }
 
-    state->power = buf[0];
-    state->color = buf[1];
+    memcpy(&state->key, buf, 8);
+
+    state->power = buf[8];
+    state->color = buf[9];
 #ifdef DEBUG
-    printf("Read %d %d\n", buf[0], buf[1]);
+    printf("Read %d %d\n", buf[8], buf[9]);
 #endif
 
     return ans;
@@ -86,6 +92,14 @@ void communicate(int fd)
     lamp_state_t state;
     if (read_state(fd, &state) <= 0)
         return;
+
+    if (state.key != KEY) {
+#ifdef DEBUG
+        printf("Wrong key: %x\n", state.key);
+#endif
+        close(fd);
+        return;
+    }
 
     if (!init_flag) {
         prev_state = state;
