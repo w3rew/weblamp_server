@@ -1,32 +1,42 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include <netinet/in.h>
 #include <signal.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <ctype.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+#include <sys/epoll.h>
 #include <unistd.h>
+#include <errno.h>
+#include <stdbool.h>
 
-#define TIMEOUT 1000 //seconds
+const size_t QUEUE_SIZE = 5;
+const size_t BUF_SIZE = 10;
+sig_atomic_t flag_continue = 1;
+bool init_flag = false;
 
 typedef struct {
     uint8_t power;
     uint8_t color;
 } lamp_state_t;
 
-sig_atomic_t flag_continue = 1;
+lamp_state_t cur_state = {0, 0};
+lamp_state_t prev_state = {0, 0};
 void handle_signals(int sig)
 {
     if (sig == SIGTERM || sig == SIGINT)
         flag_continue = 0;
 }
 
-ssize_t read_query(int client_fd, lamp_state_t* state)
+void make_nonblk(int fd)
+{
+    int flags = fcntl(fd, F_GETFL);
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
+        perror("Fcntl error!");
+}
+
+ssize_t read_state(int client_fd, lamp_state_t* state)
 {
     uint8_t query[2];
 
@@ -54,22 +64,39 @@ bool states_equal(const lamp_state_t* first, const lamp_state_t* second)
         (first->color == second->color));
 }
 
+void communicate(int fd)
+{
+    lamp_state_t state;
+    if (read_state(fd, &state) <= 0)
+        return;
 
-int main(int argc, char* argv[])
+    if (!init_flag) {
+        prev_state = state;
+        cur_state = state;
+    } else if (!states_equal(&prev_state, &state)) {
+        prev_state = cur_state;
+        cur_state = state;
+    }
+
+    send_response(fd, &cur_state);
+}
+
+    
+
+
+int main(int argc, char *argv[])
 {
     if (argc < 2)
         return 1;
-
     struct sigaction act = {.sa_handler = handle_signals, .sa_flags = 0};
     sigemptyset(&act.sa_mask);
-    /*if (sigaction(SIGINT, &act, NULL))
-        return 1;
     if (sigaction(SIGTERM, &act, NULL))
         return 1;
-        */
+    if (sigaction(SIGINT, &act, NULL))
+        return 1;
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-
+    make_nonblk(sockfd);
     uint16_t port = htons(atoi(argv[1]));
     struct sockaddr_in addr = {
         .sin_family = AF_INET, .sin_port = port, .sin_addr = {INADDR_ANY}};
@@ -78,47 +105,71 @@ int main(int argc, char* argv[])
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &val, sizeof(val));
 #endif
-    /*
-    struct timeval tv;
-    tv.tv_sec = TIMEOUT;
-    tv.tv_usec = 0;
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
-    */
 
     if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == -1)
         return 1;
 
     if (listen(sockfd, SOMAXCONN) == -1)
         return 1;
+    
+    int epoll_fd = epoll_create(1);
 
-    int client_fd = -1;
-    lamp_state_t cur_state = {0, 0};
-    lamp_state_t prev_state = {0, 0};
-    bool init_flag = false;
+    struct epoll_event event = {.data = {.fd = sockfd}, .events = EPOLLIN | EPOLLET};
 
-    while (flag_continue && ((client_fd = accept(sockfd, NULL, NULL)) != -1)) {
-        lamp_state_t state;
-        if (read_query(client_fd, &state) < 2)
-            continue;
-
-        if (!init_flag) {
-            init_flag = true;
-            prev_state = state;
-            cur_state = state;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sockfd, &event) == -1)
+        perror("Epoll error!");
+    for (;;) {
+        int client_fd = accept(sockfd, NULL, NULL);
+        if (client_fd > 0) {
+            make_nonblk(client_fd);
+            struct epoll_event client_event = {.data = {.fd = client_fd},
+                .events = EPOLLIN | EPOLLOUT | EPOLLET};
+            if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event) == -1)
+                perror("Client epoll error!");
         } else {
-            if (!states_equal(&prev_state, &state)) {
-                prev_state = cur_state;
-                cur_state = state;
+            if (errno != EWOULDBLOCK)
+                perror("Accept error!");
+            break;
+        }
+    }
+    int client_fd = -1;
+    struct epoll_event *events = calloc(QUEUE_SIZE, sizeof(struct epoll_event));
+    char buf[BUF_SIZE];
+    while (flag_continue) {
+        int read_events = epoll_wait(epoll_fd, events, QUEUE_SIZE, -1);
+        for (int i = 0; i < read_events; ++i) {
+            int fd = events[i].data.fd;
+            if (fd == sockfd) {
+                for (;;) {
+                    int client_fd = accept(sockfd, NULL, NULL);
+                    if (client_fd > 0) {
+                        make_nonblk(client_fd);
+                        struct epoll_event client_event = {
+                            .data =
+                            {.fd = client_fd},
+                            .events = EPOLLIN | EPOLLOUT | EPOLLET};
+                        if (epoll_ctl(epoll_fd,
+                                    EPOLL_CTL_ADD,
+                                    client_fd,
+                                    &client_event) == -1)
+                            perror("Client epoll error!");
+                    } else {
+                        if (errno != EWOULDBLOCK)
+                            perror("Accept error!");
+                        break;
+                    }
+                }
+            }
+            else {
+                communicate(fd);
+                shutdown(fd, SHUT_RDWR);
+                close(fd);
             }
         }
-        send_response(client_fd, &cur_state);
-
-        shutdown(client_fd, SHUT_RDWR);
-        close(client_fd);
     }
 
-    shutdown(sockfd, SHUT_RDWR);
     close(sockfd);
+    free(events);
+
     return 0;
 }
