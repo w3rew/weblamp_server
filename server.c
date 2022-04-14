@@ -178,9 +178,8 @@ int main(int argc, char *argv[])
                 }
             }
             else {
+                printf("Fd %d\n", fd);
                 communicate(fd);
-                shutdown(fd, SHUT_RDWR);
-                close(fd);
             }
         }
     }
