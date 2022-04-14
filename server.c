@@ -147,7 +147,7 @@ int main(int argc, char *argv[])
                         struct epoll_event client_event = {
                             .data =
                             {.fd = client_fd},
-                            .events = EPOLLIN | EPOLLOUT | EPOLLET};
+                            .events = EPOLLIN | EPOLLET};
                         if (epoll_ctl(epoll_fd,
                                     EPOLL_CTL_ADD,
                                     client_fd,
