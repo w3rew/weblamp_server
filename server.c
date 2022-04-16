@@ -106,8 +106,10 @@ void communicate(int fd)
         cur_state = state;
         init_flag = true;
     } else if (!states_equal(&prev_state, &state)) {
-        prev_state = cur_state;
-        cur_state = state;
+        if (!states_equal(&cur_state, &state)) {
+            prev_state = cur_state;
+            cur_state = state;
+        }
     }
 
     send_response(fd, &cur_state);
