@@ -50,8 +50,10 @@ ssize_t read_state(int client_fd, lamp_state_t* state)
 
     ans = read(client_fd, buf, MSG_SIZE);
     if (ans < MSG_SIZE) {
+#ifdef DEBUG
         fprintf(stderr, "Failed to read exactly %d bytes, read %zd\n",
                 MSG_SIZE, ans);
+#endif
         return 0;
     }
 
@@ -77,7 +79,9 @@ bool send_response(int client_fd, const lamp_state_t* state)
         return false;
     }
 
+#ifdef DEBUG
     printf("Written %zd bytes\n", ans);
+#endif
     return true;
 }
 
@@ -194,7 +198,9 @@ int main(int argc, char *argv[])
                 }
             }
             else {
+#ifdef DEBUG
                 printf("Fd %d\n", fd);
+#endif
                 communicate(fd);
             }
         }
